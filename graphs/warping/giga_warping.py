@@ -49,10 +49,22 @@ class WarpingMachine(nn.Module):
         
         with torch.no_grad():
             print('start mesh initialization')
+
             self.mesh = trimesh.load_mesh(self.params.atlas_load_path)
+            self.mesh : trimesh.Trimesh
+
             self.v = torch.from_numpy(self.mesh.vertices).float().contiguous().to(self.device)
             self.f = torch.from_numpy(self.mesh.faces).int().contiguous().to(self.device)
             self.vn = torch.tensor(self.mesh.vertex_normals).float().contiguous().to(self.device)
+
+            gs_curvature = trimesh.curvature.discrete_gaussian_curvature_measure(self.mesh)
+            mean_curvature = trimesh.curvature.discrete_mean_curvature_measure(self.mesh)
+
+            self.gs_curvature = torch.from_numpy(gs_curvature).float().contiguous().to(self.device)
+            self.mean_curvature = torch.from_numpy(mean_curvature).float().contiguous().to(self.device)
+            
+            self.saliency = self.saliency_computation()
+
             coord_max_global = torch.max(self.v, dim=0, keepdims=True)[0]
             coord_min_global = torch.min(self.v, dim=0, keepdims=True)[0]
             center_global = 0.5 * (coord_max_global + coord_min_global)
@@ -159,6 +171,56 @@ class WarpingMachine(nn.Module):
                         torch.save(viewdr, os.path.join(cache_save_folder, "viewdr_{}.pt".format(self.params.training_view_list[ras_id])))
                         
         torch.save(lits_all, os.path.join(cache_save_folder, "lits_all.pt"))
+
+    def saliency_computation(self):
+         # Step 1: Create adjacent set using the mesh edges
+        edges = self.mesh.edges_unique
+        adjacent_set = {i: set() for i in range(self.num_verts) }
+
+        saliency = []
+
+        for edge in edges:
+            v0, v1 = edge
+            adjacent_set[v0].add(v1)
+            adjacent_set[v1].add(v0)
+
+        for i in range(self.num_verts):
+  
+            neighbors_1 = adjacent_set[i]
+            
+            neighbors_2 = set()
+            for neighbor in neighbors_1:
+                neighbors_2.update(adjacent_set)
+            
+            adjacent_indices_1 = list(adjacent_set)
+            adjacent_curvatures_1= self.mean_curvature[adjacent_indices_1]
+    
+            # self.v: This is a tensor containing the vertex positions of your mesh. 
+            # Suppose it has a shape (num_verts, 3), where num_verts is the number of vertices in your mesh, and each vertex has three coordinates (x, y, z).
+            # self.v[all_neighbors]: In PyTorch (and in NumPy), you can index a tensor with a list or tensor of indices. 
+            # Here, self.v[djacent_indices_x] extracts the vertex positions of all the vertices that are listed in all_neighbors. The result is a tensor of shape (num_neighbors, 3) where num_neighbors is the total number of 1-neighbors and 2-neighbors.
+            # self.v[i]: This extracts the position of the vertex i itself. The shape of this tensor is (3,).
+            #Because self.v[i] has a shape of (3,), broadcasting occurs in PyTorch, automatically expanding self.v[i] to shape (num_neighbors, 3) to match the shape of self.v[all_neighbors]. 
+
+            distances_1 = torch.norm(self.v[adjacent_indices_1] - self.v[i], dim = 1)
+            gaussian_weights_1 = torch.exp(-distances_1**2 / (2.0 * self.params.gaussian_sigma**2) )
+            weighted_avg_curvature_1 = torch.sum(gaussian_weights_1 * adjacent_curvatures_1)  / torch.sum(gaussian_weights_1)
+
+            neighbors_12 = neighbors_1.union(neighbors_2)
+            adjacent_indices_12 = list(neighbors_12) 
+            adjacent_curvatures_12= self.mean_curvature[adjacent_indices_12]
+            distances_12 = torch.norm(self.v[neighbors_12] - self.v[i], dim=1)
+            gaussian_weights_12 = torch.exp(-distances_12**2 / (2.0 * self.params.gaussian_sigma**2) )
+            weighted_avg_curvature_12 = torch.sum(gaussian_weights_12 * adjacent_curvatures_12)  / torch.sum(gaussian_weights_12)
+
+            filter12 = gaussian_weights_12 - gaussian_weights_1
+
+            # saliency: a list where each element is a tensor of shape (1,).[tensor([0.1234]), tensor([0.2345]), ..., tensor([0.3456])] with 1000 elements, each of shape (1,).
+            saliency.append(filter12)
+
+        # A single tensor of shape (num_verts,).
+        saliency = torch.stack(saliency, dim=0).to(self.device)
+        return saliency
 
 if __name__ == "__main__":
     params = Params()
