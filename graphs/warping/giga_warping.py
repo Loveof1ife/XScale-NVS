@@ -53,17 +53,17 @@ class WarpingMachine(nn.Module):
             self.mesh = trimesh.load_mesh(self.params.atlas_load_path)
             self.mesh : trimesh.Trimesh
 
-            self.v = torch.from_numpy(self.mesh.vertices).float().contiguous().to(self.device)
-            self.f = torch.from_numpy(self.mesh.faces).int().contiguous().to(self.device)
-            self.vn = torch.tensor(self.mesh.vertex_normals).float().contiguous().to(self.device)
+            self.v = torch.from_numpy(self.mesh.vertices).float().contiguous().to(self.device) #(num_verts, 3) vertex positions
+            self.f = torch.from_numpy(self.mesh.faces).int().contiguous().to(self.device)  #Shape: (num_faces, 3) indices of vertices 
+            self.vn = torch.tensor(self.mesh.vertex_normals).float().contiguous().to(self.device) # Shape: (num_verts, 3) normal vectors for each vertex
 
-            gs_curvature = trimesh.curvature.discrete_gaussian_curvature_measure(self.mesh)
+            gs_curvature = trimesh.curvature.discrete_gaussian_curvature_measure(self.mesh) 
             mean_curvature = trimesh.curvature.discrete_mean_curvature_measure(self.mesh)
 
-            self.gs_curvature = torch.from_numpy(gs_curvature).float().contiguous().to(self.device)
-            self.mean_curvature = torch.from_numpy(mean_curvature).float().contiguous().to(self.device)
+            self.gs_curvature = torch.from_numpy(gs_curvature).float().contiguous().to(self.device).unsqueeze(1) # Shape: (num_verts, 1)
+            self.mean_curvature = torch.from_numpy(mean_curvature).float().contiguous().to(self.device).unsqueeze(1)  # Shape: (num_verts, 1)
             
-            self.saliency = self.saliency_computation()
+            self.saliency = self.saliency_computation().unsqueeze(1)# Shape: (num_verts,1)
 
             coord_max_global = torch.max(self.v, dim=0, keepdims=True)[0]
             coord_min_global = torch.min(self.v, dim=0, keepdims=True)[0]
@@ -80,6 +80,7 @@ class WarpingMachine(nn.Module):
         torch.save(self.num_verts, os.path.join(cache_save_folder, "num_verts.pt"))
         torch.save(self.center, os.path.join(cache_save_folder, "center.pt"))
         torch.save(self.scale, os.path.join(cache_save_folder, "scale.pt"))
+
         
         glctx = dr.RasterizeGLContext()
         # glctx = dr.RasterizeCudaContext()
@@ -113,6 +114,11 @@ class WarpingMachine(nn.Module):
                     
                     frg_xyz, _  = dr.interpolate(self.v.unsqueeze(0), rast, self.f)     # shape: (N_v, H, W, 3)
                     frg_normal, _ = dr.interpolate(self.vn.unsqueeze(0), rast, self.f)  # shape: (N_v, H, W, 3)
+
+                    frg_gs_curvature, _ = dr.interpolate(self.gs_curvature.unsqueeze(0), rast, self.f)  # shape: (N_v, H, W, 3)
+                    frg_mean_curvature, _ = dr.interpolate(self.mean_curvature.unsqueeze(0), rast, self.f)  # shape: (N_v, H, W, 3)
+                    frg_saliency, _ = dr.interpolate(self.sailency.unsqueeze(0), rast, self.f)  # shape: (N_v, H, W, 3)
+                
                     frg_normal = F.normalize(frg_normal, p=2, dim=-1, eps=1e-8).contiguous()
                     frg_dir = frg_xyz - campos[:, None, None, :]                     # shape: (N_v, H, W, 3)
                     frg_dir = F.normalize(frg_dir, p=2, dim=-1, eps=1e-8).contiguous()  # shape: (N_v, H, W, 3)
